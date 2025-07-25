@@ -1,0 +1,958 @@
+---
+title: "Projeto IPCA - 25.1"
+author: 'Grupo 3: Ana Luiza Ferreira, Bernardo Pitella, Felipe Toledo e Renata Quintaes'
+output:
+  html_document:
+    df_print: paged
+---
+
+# **Estrutura do Projeto**
+
+Dividimos o projeto de acordo com os tópicos de cada slide (1 a 3) e as questões a serem respondidas em cada um deles. Para cada questão, haverá uma estrutura de etapas para o trabalho ser melhor visualizado.
+
+
+# **1) Preços Livres X Administrados:**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#install.packages("httr")
+#install.packages("plotly")
+#install.packages("kableExtra")
+
+library(httr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(plotly)
+library(knitr)
+library(kableExtra)
+library(sidrar)
+library(zoo)
+library(lubridate)
+library(forecast)
+library(rbcb)
+library(purrr)
+library(seasonal)
+library(ggfortify)
+
+# Função robusta para baixar dados do Banco Central
+baixar_dados_bc = function(codigo_serie) {
+  url = paste0("https://api.bcb.gov.br/dados/serie/bcdata.sgs.", codigo_serie, "/dados?formato=csv")
+  
+  resposta <- tryCatch(GET(url), error = function(e) return(NULL))
+  if (is.null(resposta) || resposta$status_code != 200) {
+    warning(paste("Erro ao acessar a série:", codigo_serie))
+    return(data.frame(data = character(0), valor = character(0)))
+  }
+  
+  conteudo <- content(resposta, "text", encoding = "UTF-8")
+  
+  dados <- tryCatch({
+    read.csv2(text = conteudo, stringsAsFactors = FALSE)
+  }, error = function(e) {
+    warning(paste("Erro ao interpretar os dados da série:", codigo_serie))
+    return(data.frame(data = character(0), valor = character(0)))
+  })
+  
+  if (!("data" %in% names(dados)) || !("valor" %in% names(dados))) {
+    warning(paste("Estrutura inesperada para a série:", codigo_serie))
+    return(data.frame(data = character(0), valor = character(0)))
+  }
+  
+  return(dados)
+}
+
+# Códigos das séries
+codigo_ipca_geral = 433
+codigo_ipca_livres = 16121
+codigo_ipca_administrados = 16122
+
+# Baixar dados
+ipca_geral = baixar_dados_bc(codigo_ipca_geral)
+ipca_livres = baixar_dados_bc(codigo_ipca_livres)
+ipca_administrados = baixar_dados_bc(codigo_ipca_administrados)
+
+# Garantir que são data frames válidos
+stopifnot(is.data.frame(ipca_geral))
+stopifnot(is.data.frame(ipca_livres))
+stopifnot(is.data.frame(ipca_administrados))
+
+# Ordenar e ajustar
+ipca_administrados = ipca_administrados %>% arrange(desc(row_number()))
+ipca_livres = ipca_livres %>% arrange(desc(row_number())) %>% slice(1:363)
+ipca_geral = ipca_geral %>% arrange(desc(row_number())) %>% slice(1:363)
+
+# Renomear colunas
+ipca_livres = ipca_livres %>% rename(ipca_livres = valor)
+ipca_administrados = ipca_administrados %>% rename(ipca_administrados = valor)
+ipca_geral = ipca_geral %>% rename(ipca_geral = valor)
+
+# Juntar os dados
+valores_ipca = ipca_livres %>%
+  left_join(ipca_administrados, by = "data") %>%
+  left_join(ipca_geral, by = "data")
+
+valores_ipca$data = as.Date(valores_ipca$data, format = "%d/%m/%Y")
+
+# transformando o df em formato long (precisa pro ggplot2)
+
+valores_ipca_long = valores_ipca %>%
+  pivot_longer(cols = -data, names_to = "tipo", values_to = "valor")
+
+# montando grafico de linhas para os 3 ipcas desde 1995
+## obs. precisei mexer em algumas coisas na estrutura do df. 
+### por algum motivo o ggplot nao estava lendo de cara que eu queria um grafico de linhas. 
+#### depois das mudanças na estrutura, deu certo
+
+# "valor" pra formato numérico
+valores_ipca_long$valor = gsub(",", ".", valores_ipca_long$valor)
+valores_ipca_long$valor = as.numeric(valores_ipca_long$valor)
+
+# "data" pra formato date
+valores_ipca_long$data = as.Date(valores_ipca_long$data)
+
+# formatando colunas
+valores_ipca_long$valor = gsub(",", ".", valores_ipca_long$valor)
+valores_ipca_long$valor = as.numeric(valores_ipca_long$valor)
+valores_ipca_long$data = as.Date(valores_ipca_long$data)
+
+
+# Converter valores para numérico
+valores_ipca$ipca_livres = as.numeric(gsub(",", ".", valores_ipca$ipca_livres))
+valores_ipca$ipca_administrados = as.numeric(gsub(",", ".", valores_ipca$ipca_administrados))
+valores_ipca$ipca_geral = as.numeric(gsub(",", ".", valores_ipca$ipca_geral))
+
+# Correlações gerais
+cor_livre_geral_363_meses = cor(valores_ipca$ipca_livres, valores_ipca$ipca_geral, method = "pearson")
+cor_admin_geral_363_meses = cor(valores_ipca$ipca_administrados, valores_ipca$ipca_geral, method = "pearson")
+
+# Correlações por crise
+crise_2002 = subset(valores_ipca, data >= as.Date("2002-06-01") & data <= as.Date("2003-03-01"))
+cor_livre_geral_2002 = cor(crise_2002$ipca_livres, crise_2002$ipca_geral)
+cor_admin_geral_2002 = cor(crise_2002$ipca_administrados, crise_2002$ipca_geral)
+
+crise_2008 = subset(valores_ipca, data >= as.Date("2008-09-01") & data <= as.Date("2009-06-01"))
+cor_livres_geral_2008 = cor(crise_2008$ipca_livres, crise_2008$ipca_geral)
+cor_admin_geral_2008 = cor(crise_2008$ipca_administrados, crise_2008$ipca_geral)
+
+crise_2015 = subset(valores_ipca, data >= as.Date("2015-01-01") & data <= as.Date("2015-08-01"))
+cor_livres_geral_2015 = cor(crise_2015$ipca_livres, crise_2015$ipca_geral)
+cor_admin_geral_2015 = cor(crise_2015$ipca_administrados, crise_2015$ipca_geral)
+
+crise_2021 = subset(valores_ipca, data >= as.Date("2021-01-01") & data <= as.Date("2021-09-01"))
+cor_livres_geral_2021 = cor(crise_2021$ipca_livres, crise_2021$ipca_geral)
+cor_admin_geral_2021 = cor(crise_2021$ipca_administrados, crise_2021$ipca_geral)
+
+crise_2022 = subset(valores_ipca, data >= as.Date("2022-06-01") & data <= as.Date("2022-08-01"))
+cor_livres_geral_2022 = cor(crise_2022$ipca_livres, crise_2022$ipca_geral)
+cor_admin_geral_2022 = cor(crise_2022$ipca_administrados, crise_2022$ipca_geral)
+
+# Data frame para RMD
+etapa_2_RMD = data.frame(
+  `Período analisado` = c(
+    "Todos os 363 meses (1995-2025)",
+    "Crise eleitoral cambial de 2002",
+    "Crise financeira global de 2008",
+    "Reajuste tarifário de 2015",
+    "Crise energética de 2021",
+    "Intervenções tarifárias pré-eleitorais de 2022"
+  ),
+  `Correlação IPCA livres x geral` = c(
+    0.8415205,
+    0.8880468,
+    0.8148269,
+    0.9256238,
+    0.724104,
+   0.994527
+  ),
+  `Correlação IPCA administrados x geral` = c(
+    0.8935674,
+    0.9626773,
+    0.5933942,
+    0.8963967,
+    0.7908731,
+    0.981076
+  ),
+  `O que isso significa?` = c(
+    "Tanto livres quanto administrados se correlacionam fortemente com o IPCA geral no período completo, com ligeira vantagem para os administrados; mas o dado agregado não explica bem os choques específicos.",
+    "Ambos influenciaram o IPCA geral em 2002, mas os administrados tiveram correlação ainda maior, indicando que a trajetória inflacionária foi amplamente conduzida por reajustes regulados após o choque cambial.",
+    "Em 2008, os preços livres moldaram a trajetória do IPCA geral, enquanto os administrados atuaram mais como âncora, com menor correlação — sugerindo que o choque foi mais de mercado do que regulatório.",
+    "Em 2015, embora os 'tarifaços' tenham dado origem à crise, os preços livres se correlacionaram ainda mais com o IPCA geral, evidenciando a propagação dos reajustes regulados para toda a economia.",
+    "A inflação de 2021 teve múltiplas causas. Apesar da maior correlação dos administrados com o IPCA geral, os livres também responderam, mas com menor regularidade — refletindo choques globais e setoriais.",
+    "Em 2022, o choque regulatório pré-eleitoral teve efeito deflacionário sincronizado. Apesar do foco nos administrados, os preços livres responderam com tamanha intensidade que superaram sua correlação."
+  ),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Exibição com formatação avançada
+# Reformulando cabeçalhos para uma linha só
+colnames(etapa_2_RMD) <- c(
+  "Período", "corr(L, G)", "corr(A, G)", "Interpretação"
+)
+
+# Estilo executivo elegante
+kable(etapa_2_RMD, format = "html", escape = FALSE,
+      caption = "Correlação entre IPCA Livres e Administrados em Períodos Selecionados") %>%
+  kable_styling(
+    bootstrap_options = c("hover", "condensed", "responsive"),
+    full_width = TRUE,
+    font_size = 14,
+    position = "center"
+  ) %>%
+  column_spec(1, bold = TRUE, width = "14em", background = "#f8f9fa") %>%
+  column_spec(2, width = "7em") %>%
+  column_spec(3, width = "8em") %>%
+  column_spec(4, width = "32em") %>%
+  row_spec(0, bold = TRUE, background = "#dee2e6", color = "#212529") %>%
+  scroll_box(width = "100%", height = "520px")
+
+
+tabela_etapa_2 = knitr::kable(etapa_2_RMD, caption = "Correlações entre IPCA Livres e Gerais vs. Administrados e Gerais em Diferentes Períodos (95-25)")
+
+tabela_regressao = data.frame(
+  `Variável Independente` = c("IPCA livres", "IPCA administrados"),
+  `Coeficiente Estimado` = c("0.127", "0.976"),
+  `Significância` = c("0.048", "0.001"),
+  `Interpretação Econômica` = c(
+    "A cada Δ de 1 p.p. nos preços livres, o IPCA geral varia em 0.127 p.p., mantendo os administrados constantes. Influência estatisticamente significativa (tem 'margem de erro' menor que 5%).",
+    "A cada Δ de 1 p.p. nos preços administrados, o IPCA geral varia em 0.976 p.p., mantendo os livres constantes. Forte influência (quase 1:1) e alta significância estatística (tem 'margem de erro' de 0.1%)."
+  )
+)
+
+# Impressão com estilo visual compatível com a tabela anterior
+kable(tabela_regressao, "html", caption = "Resultados da Regressão Linear Múltipla entre IPCA Geral, IPCA Livres e IPCA Administrados (1995–2025)", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(1, width = "3.5cm") %>%
+  column_spec(2, width = "3cm") %>%
+  column_spec(3, width = "3.5cm") %>%
+  column_spec(4, width = "12cm") 
+  
+tabela_etapa_3 = knitr::kable(tabela_regressao, caption = "Resultados da Regressão Linear Múltipla entre IPCA Geral, IPCA Livres e IPCA Administrados (1995–2025)")
+
+```
+
+## • Relação de ΔIPCA com preços livres e administrados e Comportamentos complementares às flutuações totais
+
+Nessa questão, o objetivo é:
+
+Entender como os dois grandes grupos de preços (livres e administrados) influenciam a inflação (IPCA) ao longo do tempo.
+
+• Preços livres são mais sensíveis ao mercado (ex: alimentos, vestuário).
+
+• Preços administrados são regulados pelo governo ou têm regras específicas (ex: energia elétrica, combustíveis, transporte público).
+
+Investigar qual grupo está puxando ou segurando a inflação em determinados períodos — por exemplo, em crises ou choques de oferta.
+
+
+### Etapa 1:
+
+Nesta etapa, criamos um gráfico que inclui todas as variações mensais de IPCA geral, IPCA com preços livres e IPCA com preços administrados.
+A partir desse gráfico, podemos analisar a relação entre os três em momentos de crises, o que deixa mais restrito e interessante.
+Para a análise nesses momentos específicos, é possível dar zoom no gráfico.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+grafico_1 = (ggplot(valores_ipca_long, aes(x = data, y = valor, color = tipo, group = tipo, linetype = tipo)) +
+  geom_line(size = 1.2) +
+  
+  # faixas pra evidenciar os momentos de crise
+  annotate("rect", xmin = as.Date("2002-06-01"), xmax = as.Date("2003-01-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2008-09-01"), xmax = as.Date("2009-03-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2015-01-01"), xmax = as.Date("2015-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2021-01-01"), xmax = as.Date("2021-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2022-06-01"), xmax = as.Date("2022-12-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  
+  # estética
+  labs(title = "Evolução do IPCA: Geral, Livres e Administrados (1995–2025)",
+       subtitle = "Faixas cinza indicam períodos de grandes crises inflacionárias no Brasil",
+       x = "Ano",
+       y = "Variação mensal (%)",
+       color = "Tipo de IPCA",
+       linetype = "Tipo de IPCA") +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1)))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# adicionando um zoom que pode ser aplicado para qualquer momento (bom pra ver melhor  cada momento de crise)
+grafico_1_com_zoom = ggplotly(grafico_1)
+grafico_1_com_zoom
+```
+
+
+### Etapa 2:
+
+Para uma abordagem mais analítica, decidimos por estudar as correlações entre os preços livres e administrados com o IPCA geral.
+Dessa forma, a seguir, uma tabela com as informações nos momentos de crises e em todo o intervalo de tempo.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+tabela_etapa_2
+```
+
+
+### Etapa 3:
+
+Para entender qual dos preços de fato move o IPCA geral de forma independente, é preciso observar o momento em que ambos os preços se movem juntos.
+Com isso, a regressão linear é uma boa forma de representar essa condicionalidade, diferente da correlação, que só mostra associação.
+Ao fazer a regressão linear, obtivemos um R² do valor de 80,06%. Logo, 80,06% da variação do IPCA geral é explicada por variações simultâneas dos preços livres e administrados, enquanto 19,94% é explicada por outros fatores.
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+tabela_etapa_3
+```
+
+
+## Conclusão:
+
+• Ambos os grupos têm relação estatisticamente significativa com o IPCA geral.
+
+• A regressão linear mostrou impacto condicional muito maior dos preços administrados (quase 1:1), enquanto os livres impactam menos (1:0.127).
+
+• Logo, preços administrados são os principais determinantes estruturais da inflação, sobretudo em contextos regulatórios e no longo prazo.
+
+• No entanto, cerca de 20% da variação do IPCA não foi explicada por esses grupos, indicando influência de outros fatores.
+
+• Em crises, no entanto, os grupos mostram comportamentos complementares:
+
+• 2008 e 2015: preços livres puxaram a inflação.
+
+• 2002, 2021 e 2022: preços administrados tiveram maior peso.
+
+• Logo, existe uma conclusão geral dada pela regressão linear, mas os grupos se revezam como vetores inflacionários dependendo da natureza da crise.
+
+
+
+# **2) Índice de difusão:**
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# INICIANDO A PARTE DO ÍNDICE DE DIFUSÃO DO IPCA - SLIDE 2
+# Código do índice de difusão do IPCA 
+codigo_difusao_ipca <- 21379
+
+# Baixando os dados do BC pela fórmula criada no começo
+ipca_difusao <- baixar_dados_bc(codigo_difusao_ipca)
+
+# Formatando as colunas
+ipca_difusao$data <- as.Date(ipca_difusao$data, format = "%d/%m/%Y")
+ipca_difusao$valor <- as.numeric(gsub(",", ".", ipca_difusao$valor))
+
+#Dados da difusão do IPCA - mede a proporção de subitens com variação positiva no mês
+# Quão generalizada está a inflação
+```
+
+## • Como a evolução do índice de difusão do IPCA ajuda a entender a intensidade e a abrangência da inflação, indicando se ela está mais localizada ou generalizada
+
+O objetivo dessa questão é:
+
+Avaliar a compreensão sobre o papel do índice de difusão como ferramenta complementar ao IPCA geral. Ou seja, analisar como:
+
+• A difusão mostra quantos itens estão com preços subindo, enquanto o IPCA mostra o quanto os preços subiram em média.
+• Quando ambos sobem juntos, a inflação está intensa e generalizada.
+• Quando o IPCA sobe, mas a difusão está baixa, pode haver uma inflação localizada, puxada por poucos itens com muito peso.
+
+Basicamente, saber se é possível usar a difusão para interpretar melhor a natureza da inflação (se está espalhada ou concentrada) e como ela pode antecipar pressões futuras.
+
+
+### Etapa 1:
+
+O gráfico a seguir mostra a evolução do índice de difusão do IPCA de 1995 a 2025, com faixas cinzas marcando os períodos de crise.  
+• A linha rosa representa a difusão mensal — proporção de subitens do IPCA com aumento de preço. Quanto maior, mais generalizada está a inflação.  
+• A linha azul tracejada (LOESS) mostra a tendência suavizada da difusão ao longo do tempo.  
+• O foco era observar como a difusão se comporta nos períodos de crise econômica.  
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Criando gráfico de linha para mostrar a evolução do índice de difusão do IPCA durante o período 1995-2025
+df_difusao = ipca_difusao
+grafico_2 <- ggplot(ipca_difusao, aes(x = data, y = valor)) +
+  geom_line(color = "plum3", linewidth = 0.5, alpha = 0.9) +
+  
+  annotate("rect", xmin = as.Date("2002-06-01"), xmax = as.Date("2003-01-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2008-09-01"), xmax = as.Date("2009-03-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2015-01-01"), xmax = as.Date("2015-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2021-01-01"), xmax = as.Date("2021-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2022-06-01"), xmax = as.Date("2022-12-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  geom_line(color = 'thistle', linewidth = 0.5, alpha = 0.7) +
+  geom_smooth(method = 'loess', span = 0.25, se = FALSE,
+              color = 'navy', linetype = 'dashed', linewidth = 0.8) +
+  
+  labs(
+    title = "Evolução do Índice de Difusão do IPCA (1995–2025)",
+    subtitle = "Faixas cinza indicam principais crises econômicas",
+    x = "Ano",
+    y = "Difusão (%)"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  theme_minimal(base_size = 7) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Criando o gráfico interativo e o exibindo
+grafico_2_com_zoom = ggplotly(grafico_2)
+grafico_2_com_zoom
+```
+
+• 2002: Difusão ultrapassa 80%, indicando inflação amplamente espalhada (instabilidade política e alta do dólar).  
+• 2003–2007: Período de estabilidade com difusão em torno de 60%, inflação mais concentrada.
+• 2008: Difusão volta a crescer, mas o maior impacto da crise foi na atividade econômica, não tanto nos preços.  
+• Pré-2015: Difusão sobe novamente, antecipando aumento da pressão inflacionária.  
+• 2015: Difusão atinge novo pico acima de 75%, com reajustes tarifários, câmbio e recessão afetando muitos setores.  
+• 2016–2020: Queda e estabilização da difusão, sinalizando maior controle inflacionário.  
+• 2021: Difusão dispara no pós-pandemia, com alta global de preços, câmbio pressionado e demanda reprimida.  
+• 2022 em diante: Tendência de queda e estabilização da difusão, indicando ambiente com maior controle inflacionário.  
+
+Conclusão:
+
+• Difusão mostra quantos itens estão subindo de preço; o IPCA mostra quanto esses preços estão subindo.  
+• Quando a difusão está alta, mesmo com IPCA moderado, a inflação é mais difícil de controlar por afetar muitos setores ao mesmo tempo.  
+• A curva azul (LOESS) ajuda a visualizar tendências de médio prazo.  
+• Escala percentual da difusão facilita a interpretação: por exemplo, 70% significa que 7 a cada 10 itens subiram de preço.
+
+
+### Etapa 2:
+
+Essa próxima tabela mostra a média do índice de difusão do IPCA nos momentos de crise econômica no Brasil - período escolhido por nós. Se o índice está alto, significa que a inflação está espalhada por diversos setores - dificultando o controle dos preços.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+media_difusao_periodo <- function(inicio, fim) {
+  mean(subset(ipca_difusao, data >= as.Date(inicio) & data <= as.Date(fim))$valor, na.rm = TRUE)
+}
+
+medias_difusao <- data.frame(
+  Período = c("Crise 2002", "Crise 2008", "Crise 2015", "Crise 2021", "Crise 2022"),
+  `Difusão Média (%)` = round(c(
+    media_difusao_periodo("2002-06-01", "2003-01-01"),
+    media_difusao_periodo("2008-09-01", "2009-03-01"),
+    media_difusao_periodo("2015-01-01", "2015-12-31"),
+    media_difusao_periodo("2021-01-01", "2021-12-31"),
+    media_difusao_periodo("2022-06-01", "2022-12-01")
+  ), 1)
+)
+colnames(medias_difusao)[colnames(medias_difusao) == 'Difusão.Média....'] = 'Difusão Média'
+
+medias_difusao$Análise = c("Inflação espalhada com a instabilidade política e o dólar disparado",
+                           'Impacto maior na economia real do que nos preços - inflação mais contida',
+                           "Mesmo com recessão, alta em alguns setores econômicos fez a inflação espalhar",
+                           "Retomada pós pandemia - pressão maior sobre os preços",
+                           "Difusão teve uma queda aos poucos - juros mais altos e controle monetário")
+
+kable(medias_difusao,"html", caption = 'Média do Índice de Difusão do IPCA por Crise (1995-2025)', align = 'c') %>% 
+  kable_styling(full_width = FALSE, position = 'center', bootstrap_options = c('striped','houver','condensed')) %>% 
+  column_spec(1, width = '4cm', bold = TRUE) %>% 
+  column_spec(2, width = '3.5cm') %>% 
+  column_spec(3, width = '35em')
+```
+
+• Crise 2002 (72,4%): Inflação espalhada. Alta do dólar e instabilidade política afetaram muitos setores simultaneamente.  
+• Crise 2008 (62,0%): Impacto menor nos preços. Inflação mais concentrada, crise atingiu mais a atividade econômica do que os preços.  
+• Crise 2015 (69,7%): Inflação amplamente difundida durante a recessão. Muitos setores afetados.  
+• Crise 2021 (65,9%): Inflação generalizada no contexto pós-pandemia. Demanda reprimida e economia reabrindo.  
+• Crise 2022 (64,5%): Inflação começa a ceder. Aumento dos juros e controle monetário surtindo efeito.  
+
+Resumo:
+
+• Em momentos de crise, a difusão geralmente aumenta — choques de preço se espalham por vários setores.  
+• Políticas monetárias eficazes tendem a reduzir a difusão, mesmo que o IPCA não caia de imediato.  
+• É mais fácil conter a inflação quando poucos itens têm aumento de preço. Difusão alta dificulta o controle inflacionário.  
+
+
+### Etapa 3:
+
+O próximo passo foi criar uma regressão linear para ver a relação entre o IPCA Geral e o Índice de Difusão
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Garantindo que ambas as colunas 'data' estejam no formato Date
+# Garantindo conversão de 'ipca_geral' para numérico antes do join
+ipca_geral$ipca_geral <- as.numeric(gsub(",", ".", ipca_geral$ipca_geral))
+
+ipca_geral$data <- as.Date(ipca_geral$data, format = "%d/%m/%Y")
+ipca_difusao$data <- as.Date(ipca_difusao$data, format = "%d/%m/%Y")
+
+# Criando o dataframe comparativo (juntando IPCA geral com índice de difusão)
+comparativo <- left_join(ipca_geral, ipca_difusao, by = "data") %>%
+  rename(difusao = valor)
+
+# --- Modelo de regressão: IPCA Geral ~ Difusão ---
+comparativo <- na.omit(comparativo)
+modelo <- lm(ipca_geral ~ difusao, data = comparativo)
+modelo
+
+
+#O intercepto é a estimativa do valor do IPCA Geral quando a difusão é zero (não possui sentido prático para nós- nunca acontece, mas é útil para entender o modelo)
+#O coeficiente de difusão é o quanto o IPCA Geral varia a cada ponto percentual de variação na difusão
+```
+
+• Intercept (-1.83) - Valor estimado do IPCA Geral quando a difusão é igual a zero. Isso não acontece na vida real e não tem nenhum valor prático, ele só existe para entender o modelo.
+
+• Difusão - A cada aumento de 1 ponto percentual na difusão, O IPCA Geral tende a aumentar cerca de 0.038 pontos percentuais
+
+Ou seja, existe uma correlação positiva entre a difusão IPCA Geral. Quanto maior a difusão (inflação mais espalhada), o IPCA Geral tende a ser maior também. Ajuda a firmar a ideia de que a difusão pode chegar a antecipar, ou amplificar os movimentos inflacionários
+
+
+### Etapa 4:
+
+O gráfico “IPCA Geral vs. Índice de Difusão do IPCA (1995–2025)” compara a inflação oficial com o grau de espalhamento dos aumentos de preços.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Simultaneamente a inflação medida pelo IPCA geral e o quao espalhada ela está
+ipca_geral$data <- as.Date(ipca_geral$data, format = "%d/%m/%Y")
+ipca_geral$ipca_geral <- as.numeric(gsub(",", ".", ipca_geral$ipca_geral))
+
+ipca_difusao$data <- as.Date(ipca_difusao$data, format = "%d/%m/%Y")
+ipca_difusao$valor <- as.numeric(gsub(",", ".", ipca_difusao$valor))
+
+# Juntando as duas séries
+comparativo <- left_join(ipca_geral, ipca_difusao, by = "data") %>%
+  rename(difusao = valor)
+
+# Plotando com escalas diferentes
+grafico_3 <- ggplot(comparativo, aes(x = data)) +
+  geom_line(aes(y = ipca_geral, color = "IPCA Geral"), linewidth = 0.4, alpha = 0.9) +
+  geom_line(aes(y = difusao/2, color = "Difusão (escala ajustada)"), linewidth = 0.9, linetype = "dashed") +
+  annotate("rect", xmin = as.Date("2002-06-01"), xmax = as.Date("2003-01-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2008-09-01"), xmax = as.Date("2009-03-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2015-01-01"), xmax = as.Date("2015-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2021-01-01"), xmax = as.Date("2021-12-31"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3) +
+  annotate("rect", xmin = as.Date("2022-06-01"), xmax = as.Date("2022-12-01"),
+           ymin = -Inf, ymax = Inf, fill = "grey80", alpha = 0.3)+
+  
+  # Estética
+  labs(title = "IPCA Geral vs. Índice de Difusão do IPCA (1995–2025)",
+       subtitle = "A linha de difusão foi ajustada para facilitar visualização. Tendências similares indicam inflação espalhada.",
+       x = "Ano", y = "Variação mensal (%) / Difusão ajustada",
+       color = "") +
+  scale_color_manual(values = c("IPCA Geral" = "orchid3", "Difusão (escala ajustada)" = "paleturquoise")) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Interativo
+grafico_3_com_zoom = ggplotly(grafico_3)
+grafico_3_com_zoom
+```
+
+• Linha roxa: variação mensal do IPCA Geral (%).  
+• Linha azul claro (tracejada): índice de difusão ajustado (dividido por 2 para facilitar comparação visual).  
+• Faixas cinza marcam cinco crises econômicas: 2002, 2008, 2015, 2021 e 2022.
+
+• Quando as curvas sobem juntas → inflação generalizada, afetando muitos setores ao mesmo tempo.  
+  - Ex: crise dos tarifaços em 2015 e crise pós-pandemia/energética em 2021.
+
+• Quando há descolamento entre as curvas → inflação concentrada em poucos itens.  
+  - Ex: parte de 2002 e 2022, com choques específicos (câmbio, regulação).
+
+• Difusão dividida por 2 é escolha metodológica para alinhar escalas e facilitar análise visual.  
+
+
+### Etapa 5:
+
+Gráfico de dispersão entre o índice de difusão do IPCA e o IPCA Geral - com uma linha de tendência.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Garantindo formato adequado das colunas
+ipca_geral$data <- as.Date(ipca_geral$data, format = "%d/%m/%Y")
+ipca_geral$ipca_geral <- as.numeric(gsub(",", ".", ipca_geral$ipca_geral))
+ipca_difusao$data <- as.Date(ipca_difusao$data, format = "%d/%m/%Y")
+ipca_difusao$valor <- as.numeric(gsub(",", ".", ipca_difusao$valor))
+
+# Juntando as séries
+comparativo <- left_join(ipca_geral, ipca_difusao, by = "data") %>%
+  rename(difusao = valor)
+
+# Calculando a correlação de Pearson
+correlacao <- cor(comparativo$ipca_geral, comparativo$difusao, use = "complete.obs")
+
+# Gráfico de dispersão com linha de tendência
+grafico_4 <- ggplot(comparativo, aes(x = difusao, y = ipca_geral)) +
+  geom_point(alpha = 0.5, color = "mediumorchid") +
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 0.8) +
+  labs(
+    title = "Correlação entre Índice de Difusão e IPCA Geral",
+    subtitle = paste0("Correlação de Pearson = ", round(correlacao, 3)),
+    x = "Índice de Difusão do IPCA",
+    y = "IPCA Geral (% ao mês)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text = element_text(color = "gray30")
+  )
+
+grafico_4_com_zoom = ggplotly(grafico_4)
+grafico_4_com_zoom
+```
+
+• O gráfico mostra o comportamento mensal da inflação entre 1995 e 2025.  
+• Eixo X: índice de difusão (quantos itens do IPCA subiram de preço).  
+• Eixo Y: variação mensal do IPCA Geral (quanto os preços subiram em média).  
+• Cada ponto rosa representa um mês da série.  
+• A linha vermelha mostra a tendência linear entre as duas variáveis.
+
+• Correlação de Pearson: 0.696 → forte correlação positiva.  
+  - Quanto mais itens sobem de preço, maior tende a ser o IPCA do mês.  
+
+• A inflação depende tanto da intensidade das altas quanto da quantidade de preços subindo.  
+• Difusão baixa → mesmo com altas pontuais, o IPCA pode se manter controlado.  
+• Difusão alta → inflação está espalhada e pressiona o IPCA para cima.
+
+• O índice de difusão atua como um termômetro da abrangência da inflação.  
+  - Difusão subindo com IPCA ainda baixo → alerta para possível alta futura.  
+  - Difusão caindo com IPCA ainda alto → possível alívio inflacionário à frente.
+
+
+
+# **3) Tendência e Ajustes:**
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#DESSAZONALIZAÇÃO
+
+#install.packages("rbcb")
+#install.packages("forecast")
+
+transportes = rbcb::get_series(c(transportes = 1639),
+                               start_date = "2000-01-01",
+                               end_date = "2020-01-01",
+                               as = "ts")
+transportes = as.data.frame(transportes)
+
+colnames(transportes) = "valor_transporte"
+
+transportes$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(transportes))
+
+transportes = transportes[, c("data", "valor_transporte")]
+
+#######################################################################################################
+
+alimentacao = rbcb::get_series(c(alimentacao = 1635),
+                               start_date = "2000-01-01",
+                               end_date = "2020-01-01",
+                               as = "ts")
+alimentacao = as.data.frame(alimentacao)
+
+colnames(alimentacao) = "valor_alimentacao"
+
+alimentacao$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(alimentacao))
+
+alimentacao = alimentacao[, c("data", "valor_alimentacao")]
+
+#######################################################################################################
+
+habilitacao = rbcb::get_series(c(habilitacao = 1636),
+                               start_date = "2000-01-01",
+                               end_date = "2020-01-01",
+                               as = "ts")
+habilitacao = as.data.frame(habilitacao)
+
+colnames(habilitacao) = "valor_habilitacao"
+
+habilitacao$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(habilitacao))
+
+habilitacao = habilitacao[, c("data", "valor_habilitacao")]
+
+#######################################################################################################
+
+residencia = rbcb::get_series(c(residencia = 1637),
+                              start_date = "2000-01-01",
+                              end_date = "2020-01-01",
+                              as = "ts")
+residencia = as.data.frame(residencia)
+
+colnames(residencia) = "valor_residencia"
+
+residencia$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(residencia))
+
+residencia = residencia[, c("data", "valor_residencia")]
+
+#######################################################################################################
+
+vestuario = rbcb::get_series(c(vestuario = 1638),
+                             start_date = "2000-01-01",
+                             end_date = "2020-01-01",
+                             as = "ts")
+vestuario = as.data.frame(vestuario)
+
+colnames(vestuario) = "valor_vestuario"
+
+vestuario$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(vestuario))
+
+vestuario = vestuario[, c("data", "valor_vestuario")]
+
+#######################################################################################################
+
+comunicacao = rbcb::get_series(c(comunicacao = 1640),
+                               start_date = "2000-01-01",
+                               end_date = "2020-01-01",
+                               as = "ts")
+comunicacao = as.data.frame(comunicacao)
+
+colnames(comunicacao) = "valor_comunicacao"
+
+comunicacao$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(comunicacao))
+
+comunicacao = comunicacao[, c("data", "valor_comunicacao")]
+
+#######################################################################################################
+
+saude = rbcb::get_series(c(saude = 1641),
+                         start_date = "2000-01-01",
+                         end_date = "2020-01-01",
+                         as = "ts")
+saude = as.data.frame(saude)
+
+colnames(saude) = "valor_saude"
+
+saude$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(saude))
+
+saude = saude[, c("data", "valor_saude")]
+
+#######################################################################################################
+
+despesas_pessoais = rbcb::get_series(c(despesas_pessoais = 1642),
+                                     start_date = "2000-01-01",
+                                     end_date = "2020-01-01",
+                                     as = "ts")
+despesas_pessoais = as.data.frame(despesas_pessoais)
+
+colnames(despesas_pessoais) = "valor_despesas_pessoais"
+
+despesas_pessoais$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(despesas_pessoais))
+
+despesas_pessoais = despesas_pessoais[, c("data", "valor_despesas_pessoais")]
+
+#######################################################################################################
+
+educacao = rbcb::get_series(c(educacao = 1643),
+                            start_date = "2000-01-01",
+                            end_date = "2020-01-01",
+                            as = "ts")
+educacao = as.data.frame(educacao)
+
+colnames(educacao) = "valor_educacao"
+
+educacao$data = seq(from = as.Date("2000-01-01"), by = "month", length.out = nrow(educacao))
+
+educacao = educacao[, c("data", "valor_educacao")]
+
+#######################################################################################################
+
+lista_grupos = list(
+  alimentacao,
+  habilitacao,
+  residencia,
+  vestuario,
+  transportes,
+  comunicacao,
+  saude,
+  despesas_pessoais,
+  educacao
+)
+
+valores_ipca_grupos = reduce(lista_grupos, left_join, by = "data")
+```
+
+## • Como as variações acumuladas de cada grupo do IPCA se relacionam com inflação de longo prazo
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# calculando valor da inflacao acumulada ao longo dos 20 anos observados
+## transforma a variacao mensal em uma trajetoria de inflacao acumulada nos 20 anos
+
+valores_ipca_grupos_acumulado = valores_ipca_grupos %>%
+  arrange(data) %>%
+  mutate(acum_alimentacao = cumsum(valor_alimentacao),
+         acum_habilitacao = cumsum(valor_habilitacao),
+         acum_residencia = cumsum(valor_residencia),
+         acum_vestuario = cumsum(valor_vestuario),
+         acum_transportes = cumsum(valor_transporte),
+         acum_comunicacao = cumsum(valor_comunicacao),
+         acum_saude = cumsum(valor_saude),
+         acum_despesas_pessoais = cumsum(valor_despesas_pessoais),
+         acum_educacao = cumsum(valor_educacao))
+
+# transformando em long pra os graficos
+valores_long = valores_ipca_grupos_acumulado %>%
+  select(data, starts_with("acum_")) %>%
+  pivot_longer(cols = -data, names_to = "grupo", values_to = "valor")
+
+valores_long$grupo = gsub("acum_", "", valores_long$grupo)
+
+# plotando o grafico 
+grafico_ipca_grupos_acum = ggplot(valores_long, aes(x = data, y = valor, color = grupo)) +
+  geom_line(size = 1) +
+  labs(title = "Tendência Acumulada do IPCA por Grupo (2000–2020)",
+       x = "Ano", y = "Inflação acumulada (%)",
+       color = "Grupo de despesa") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+grafico_ipca_grupos_acum
+
+```
+
+• Inflação heterogênea por grupo (2000–2020):
+
+  -  Educação, saúde e habitação: crescimento contínuo → pressão estrutural persistente.
+
+  -  Alimentação e transportes: alta volatilidade → sensíveis a choques externos (clima, câmbio).
+
+  -  Vestuário e comunicação: inflação contida → menor pressão ao longo do tempo.
+
+• Importância da análise acumulada:
+
+  -  Evidencia tendências de longo prazo, mesmo com flutuações mensais.
+
+  -  Ajuda a distinguir inflação estrutural (contínua e previsível) de choques transitórios.
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# fazendo uma analise numerica
+
+# inflação anual a partir das series mensais acumuladas
+inflacao_anual_por_grupo = valores_ipca_grupos_acumulado %>%
+  mutate(ano = year(data)) %>%
+  group_by(ano) %>%
+  summarise(
+    alimentacao = last(acum_alimentacao) - first(acum_alimentacao),
+    habilitacao = last(acum_habilitacao) - first(acum_habilitacao),
+    residencia = last(acum_residencia) - first(acum_residencia),
+    vestuario = last(acum_vestuario) - first(acum_vestuario),
+    transportes = last(acum_transportes) - first(acum_transportes),
+    comunicacao = last(acum_comunicacao) - first(acum_comunicacao),
+    saude = last(acum_saude) - first(acum_saude),
+    despesas_pessoais = last(acum_despesas_pessoais) - first(acum_despesas_pessoais),
+    educacao = last(acum_educacao) - first(acum_educacao)
+  )
+
+# em formato long para facilitar a análise
+inflacao_anual_long = inflacao_anual_por_grupo %>%
+  pivot_longer(cols = -ano, names_to = "grupo", values_to = "inflacao_anual")
+
+# Calcular desvio padrão da inflação anual por grupo
+volatilidade_por_grupo = inflacao_anual_long %>%
+  group_by(grupo) %>%
+  summarise(desvio_padrao = sd(inflacao_anual, na.rm = TRUE)) %>%
+  arrange(desc(desvio_padrao))
+
+# Visualizar os grupos mais voláteis
+volatilidade_por_grupo
+```
+
+## • Grupos com maior consistência ou volatilidade em suas variações acumuladas:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# tabela para rmd
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+options(kableExtra.latex.load_packages = FALSE)
+volatilidade_por_grupo %>%
+  arrange(desc(desvio_padrao)) %>%
+  mutate(desvio_padrao = round(desvio_padrao, 2)) %>%
+  rename(
+    `Grupo de Despesa` = grupo,
+    `Desvio Padrão da Inflação Anual (%)` = desvio_padrao
+  ) %>%
+  kable("html", align = "lc", escape = FALSE,
+        caption = "Tabela 1 – Volatilidade da Inflação Anual por Grupo (2000–2020)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 14) %>%
+  column_spec(2, bold = TRUE, color = "white", background = "#3E8E7E") %>%
+  row_spec(0, bold = TRUE, background = "#2F4F4F", color = "white") 
+```
+
+• A análise da tendência acumulada (2000–2020) revela forte heterogeneidade estrutural entre os grupos.
+  
+• Educação, saúde e habitação mostraram crescimento contínuo e previsível → indicam pressões inflacionárias estruturais.
+
+• Alimentação e transportes foram mais voláteis → refletem choques externos (climáticos, cambiais).
+
+• A análise do desvio padrão da inflação anual confirmou esses padrões:
+  
+  - Grupos mais voláteis:  
+    • Comunicação (5,15%)  
+    • Alimentação (4,35%)  
+    • Transportes (3,47%)
+  
+  - Grupos mais estáveis:  
+    • Saúde (2,29%)  
+    • Educação (2,34%)  
+    • Despesas pessoais (1,94%)
+
+• Comunicação é um caso emblemático: crescimento contido no acumulado, mas fortes oscilações anuais → sugere eventos pontuais (ex: mudanças tributárias ou tecnológicas).
+
+• A combinação de análise visual com estatísticas de dispersão permite identificar padrões consistentes vs. erráticos.
+
+• A avaliação da consistência ou volatilidade vai além da trajetória acumulada, sendo aprofundada por medidas empíricas de variabilidade interanual.
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Série mensal em formato ts
+serie_ts <- ts(valores_ipca$ipca_geral, start = c(1995, 1), frequency = 12)
+
+# Decomposição aditiva
+decomposta <- decompose(serie_ts)
+
+# Visualização
+autoplot(decomposta) +
+  labs(title = "Dessazonalização do IPCA Geral", y = "Variação (%)") +
+  theme_minimal()
+
+# Extração da série dessazonalizada
+valores_ipca$ipca_geral_dessazonalizado <- as.numeric(decomposta$trend)
+```
+
+## • IPCA Geral de maneira dessazonalizada:
+
+```{r message=FALSE, warning=FALSE}
+# GRÁFICO IPCA GERAL E DESSAZONALIZADO
+serie_ts = ts(valores_ipca$ipca_geral, start = c(1995,1), frequency = 12)
+modelo_decomposto = decompose(serie_ts)
+valores_ipca$ipca_dessazonal = as.numeric(modelo_decomposto$trend)
+grafico_decomposto = ggplot(valores_ipca, aes(x = data)) +
+  geom_line(aes(y = ipca_geral, color = 'Original'), alpha = 0.6, linewidth = 0.6) +
+  geom_line(aes(y = ipca_dessazonal, color = "Tendência (Decomposta)"), linewidth = 0.8, linetype = 'dashed') +
+  scale_color_manual(values = c('Original' = "plum", "Tendência (Decomposta)" = "navy")) +
+  labs(title = "IPCA Geral: Original e Dessazonalizado",
+       x = "Ano", y = "Variação mensal (%)", color = "Série") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = 'bottom', axis.text.x = element_text(angle = 45, hjust = 1))
+grafico_decomposto_com_zoom = ggplotly(grafico_decomposto)
+grafico_decomposto_com_zoom
+
+#Linha original (plum) é o IPCA mÊs a mês - todas as flutuações
+#Linha tracejada (navy) é a linha de tendência decomposta - como a inflação teria se comportado sem a sazonalidade
+```
+
+• Linha rosa representa a série original do IPCA mês a mês, com todas as flutuações observadas.
+
+• Linha azul tracejada mostra a tendência da série — ou seja, como a inflação se comportaria sem os efeitos sazonais.  
+
+• A tendência suaviza picos e vales que ocorrem apenas em certos meses (como volta às aulas ou datas comemorativas).  
+
+• Essa suavização ajuda a interpretar se um aumento é apenas sazonal ou se representa uma inflação mais persistente.  
+
+• Pode haver atraso entre a série original e a tendência, pois a tendência é uma média suavizada.  
+
+• A série original (rosa) mostra a inflação total; a tendência (azul) revela a inflação subjacente ou persistente.  
+
+• Quando há grande distância entre as duas linhas, pode indicar sazonalidade intensa ou choques pontuais.  
+
+• Se a linha rosa oscila, mas a azul segue estável, entende-se que a inflação está contida, com variações pontuais de curto prazo.
