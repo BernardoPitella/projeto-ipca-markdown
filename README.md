@@ -1,2 +1,2 @@
-# projeto-ipca-markdown
+# projeto-ipca
 Análise do IPCA com R Markdown
